@@ -108,6 +108,32 @@ class ArbitrationDecision:
 TrailRecord = RankingSnapshot | ArbitrationDecision
 
 
+class EventKind(Enum):
+    """The kinds of state change the engine stream reports to its readers.
+
+    The event stream is a read-side view of queue operations — arrivals, removals,
+    profile switches, re-ranks, freed beds, and allocations — so consumers like the
+    dashboard can show what moved the queue without re-deriving it from the trail.
+    """
+
+    ARRIVAL = "arrival"
+    REMOVAL = "removal"
+    PROFILE_CHANGE = "profile-change"
+    RERANK = "re-rank"
+    BED_FREED = "bed-freed"
+    ALLOCATION = "allocation"
+
+
+@dataclass(frozen=True)
+class Event:
+    """One immutable record in the engine's event stream."""
+
+    id: int
+    occurred_at: datetime
+    kind: EventKind
+    detail: str
+
+
 def _weight_breakdown(profile: WeightProfile) -> str:
     parts = (
         round(profile.severity * 100),
@@ -127,6 +153,12 @@ def _recommendation_reasoning(view: EntryView, wait_horizon: timedelta) -> str:
         f"under {view.profile.name} ({_weight_breakdown(view.profile)}), "
         f"wait horizon {_fmt_duration(wait_horizon)}{reason}"
     )
+
+
+def _fmt_deviation_suffix(allocated: EntryView, recommended: EntryView) -> str:
+    if allocated.entry_id == recommended.entry_id:
+        return ""
+    return f" (deviated from recommended {recommended.patient_id})"
 
 
 class UnknownPatient(ValueError):
@@ -182,9 +214,11 @@ class Engine:
         self._patients: dict[PatientId, Patient] = {}
         self._entries: dict[EntryId, _QueueEntry] = {}
         self._trail: tuple[TrailRecord, ...] = ()
+        self._events: tuple[Event, ...] = ()
         self._next_patient = 1
         self._next_entry = 1
         self._next_trail = 1
+        self._next_event = 1
 
     def register_patient(
         self, *, sofa: Sofa, age: int, comorbidities: tuple[str, ...]
@@ -205,16 +239,26 @@ class Engine:
         self._entries[entry_id] = _QueueEntry(
             id=entry_id, patient_id=patient_id, created_at=self._clock.now()
         )
+        self._record_event(
+            EventKind.ARRIVAL, f"{patient_id} arrived; queue entry {entry_id} opened"
+        )
         return entry_id
 
     def set_profile(self, profile: WeightProfile) -> None:
         """Switch the active profile; every already-ranked Queue Entry rescored under it."""
         self._profile = profile
+        self._record_event(
+            EventKind.PROFILE_CHANGE, f"weight profile switched to {profile.name}"
+        )
 
     def close_entry(self, entry_id: EntryId) -> None:
         if entry_id not in self._entries:
             raise UnknownEntry(entry_id)
+        patient_id = self._entries[entry_id].patient_id
         del self._entries[entry_id]
+        self._record_event(
+            EventKind.REMOVAL, f"{patient_id} removed; queue entry {entry_id} closed"
+        )
 
     def current_queue(self) -> QueueView:
         return QueueView(
@@ -240,16 +284,21 @@ class Engine:
     def snapshot(self, trigger: str) -> RankingSnapshot:
         """Re-rank under the current profile and append an immutable record to the trail."""
         now = self._clock.now()
+        entries = tuple(self._rank(now))
         record = RankingSnapshot(
             snapshot_id=self._next_trail,
             captured_at=now,
             trigger=trigger,
             profile=self._profile,
             wait_horizon=self._wait_horizon,
-            entries=tuple(self._rank(now)),
+            entries=entries,
         )
         self._trail = (*self._trail, record)
         self._next_trail += 1
+        self._record_event(
+            EventKind.RERANK,
+            f"re-ranked {len(entries)} entries — trigger: {trigger}",
+        )
         return record
 
     def recommend(self, trigger: str = "bed-freed") -> Recommendation:
@@ -259,6 +308,10 @@ class Engine:
         if not queue:
             raise EmptyQueue("cannot recommend a freed bed — the queue is empty")
         top = queue[0]
+        self._record_event(
+            EventKind.BED_FREED,
+            f"bed freed — {top.patient_id} recommended top candidate",
+        )
         return Recommendation(
             trigger=trigger,
             entry=top,
@@ -343,15 +396,34 @@ class Engine:
         )
         self._trail = (*self._trail, decision)
         self._next_trail += 1
+        deviation = _fmt_deviation_suffix(allocated_view, recommended_view)
+        self._record_event(
+            EventKind.ALLOCATION,
+            f"{outcome.value}: bed allocated to {allocated_view.patient_id}{deviation}",
+        )
         self.close_entry(allocated_view.entry_id)
         return decision
+
+    def now(self) -> datetime:
+        """The engine's current instant — a read query for consumers that show 'as of' time."""
+        return self._clock.now()
 
     def trail(self) -> tuple[TrailRecord, ...]:
         """The append-only audit trail, in creation order."""
         return self._trail
 
+    def events(self) -> tuple[Event, ...]:
+        """The append-only event stream, in occurrence order (spec query)."""
+        return self._events
+
+    def _record_event(self, kind: EventKind, detail: str) -> None:
+        self._events = (*self._events, Event(
+            id=self._next_event, occurred_at=self._clock.now(), kind=kind, detail=detail
+        ))
+        self._next_event += 1
+
     def snapshot_at(self, snapshot_id: int) -> RankingSnapshot:
-        """The stored snapshot for a past re-rank, without replaying any events."""
+        """The stored snapshot for a past re-rank — a direct read, no re-running of commands."""
         for record in self._trail:
             if isinstance(record, RankingSnapshot) and record.snapshot_id == snapshot_id:
                 return record

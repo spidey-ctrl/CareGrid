@@ -19,3 +19,7 @@ class ManualClock:
 
     def advance(self, delta: timedelta) -> None:
         self._now = self._now + delta
+
+    def set(self, value: datetime) -> None:
+        """Jump to an absolute instant; used by scenario builders for staggered arrivals."""
+        self._now = value

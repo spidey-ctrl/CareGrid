@@ -384,6 +384,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="TEXT",
         help="free-text clinician note recorded on the decision",
     )
+    serve = sub.add_parser(
+        "serve",
+        help="run the read-only web dashboard (React UI + JSON API)",
+    )
+    serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="interface to bind (default: 127.0.0.1)",
+    )
+    serve.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="port to listen on (default: 8000)",
+    )
+    _add_ward_args(serve)
     args = parser.parse_args(argv)
 
     if args.command == "demo":
@@ -446,6 +462,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
         _print_trail(engine)
+        return 0
+
+    if args.command == "serve":
+        from .scenario import demo_engine
+        from .web import create_dashboard_app
+
+        if getattr(args, "patients", None) or getattr(args, "csv", None):
+            base = _base_time()
+            engine = Engine(
+                survival_model=PlaceholderSurvivalModel(),
+                clock=ManualClock(base),
+                profile=next(p for p in PRESETS if p.name == args.profile),
+            )
+            patients = _demand_ward(parser, args)
+            if args.csv:
+                print(f"loaded {len(patients)} patients from {args.csv}")
+            _register_ward(engine, patients, snapshot=base)
+        else:
+            engine = demo_engine()
+
+        app = create_dashboard_app(engine)
+        import uvicorn
+
+        print(
+            f"CareGrid dashboard: http://{args.host}:{args.port}/ "
+            f"(profile {engine.current_queue().profile.name}, "
+            f"{len(engine.trail())} trail records)"
+        )
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
         return 0
 
     parser.error(f"unknown command '{args.command}'")
