@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Mapping, Protocol
 
 from .clock import Clock
@@ -9,6 +9,8 @@ from .survival import SurvivalModel, SurvivalPrediction
 
 PatientId = str
 EntryId = str
+
+DEFAULT_WAIT_HORIZON = timedelta(hours=24)
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,7 @@ class EntryView:
     waiting_factor: float
     survival_probability: float
     survival_attribution: Mapping[str, float]
+    waiting_time: timedelta
     created_at: datetime
     profile: WeightProfile
 
@@ -43,6 +46,7 @@ class EntryView:
 @dataclass(frozen=True)
 class QueueView:
     profile: WeightProfile
+    wait_horizon: timedelta
     entries: tuple[EntryView, ...]
 
 
@@ -70,10 +74,12 @@ class Engine:
         survival_model: SurvivalModel,
         clock: Clock,
         profile: WeightProfile | None = None,
+        wait_horizon: timedelta | None = None,
     ):
         self._survival_model = survival_model
         self._clock = clock
         self._profile = profile if profile is not None else SEVERITY_DOMINANT
+        self._wait_horizon = wait_horizon if wait_horizon is not None else DEFAULT_WAIT_HORIZON
         self._patients: dict[PatientId, Patient] = {}
         self._entries: dict[EntryId, _QueueEntry] = {}
         self._next_patient = 1
@@ -106,20 +112,26 @@ class Engine:
         del self._entries[entry_id]
 
     def current_queue(self) -> QueueView:
+        now = self._clock.now()
         entries = tuple(
             sorted(
-                (self._entry_view(e) for e in self._entries.values()),
+                (self._entry_view(e, now) for e in self._entries.values()),
                 key=lambda v: v.score,
                 reverse=True,
             )
         )
-        return QueueView(profile=self._profile, entries=entries)
+        return QueueView(profile=self._profile, wait_horizon=self._wait_horizon, entries=entries)
 
-    def _entry_view(self, entry: _QueueEntry) -> EntryView:
+    def _waiting_factor(self, waiting_time: timedelta) -> float:
+        ratio = waiting_time / self._wait_horizon
+        return min(1.0, ratio * ratio)
+
+    def _entry_view(self, entry: _QueueEntry, now: datetime) -> EntryView:
         patient = self._patients[entry.patient_id]
         severity_factor = patient.severity_factor()
         survival_factor = patient.survival_factor()
-        waiting_factor = 0.0
+        waiting_time = now - entry.created_at
+        waiting_factor = self._waiting_factor(waiting_time)
         score = (
             self._profile.severity * severity_factor
             + self._profile.survival * survival_factor
@@ -134,6 +146,7 @@ class Engine:
             waiting_factor=waiting_factor,
             survival_probability=patient.survival.probability,
             survival_attribution=patient.survival.attribution,
+            waiting_time=waiting_time,
             created_at=entry.created_at,
             profile=self._profile,
         )
