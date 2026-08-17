@@ -53,9 +53,8 @@ def test_movement_indicator_compares_live_rank_to_last_snapshot(
     state = client.get("/api/state").json()
 
     movement = {e["patient_id"]: e["movement"] for e in state["queue"]}
-    assert movement["patient-1"] == "down"  # long-waiter overtaken at the live view
-    assert movement["patient-2"] == "up"
-    assert movement["patient-3"] == "up"  # the longer waiter of the near-tie pair
+    assert movement["patient-1"] == "unchanged"  # wait-exhausted top holds at the live view
+    assert movement["patient-3"] == "up"  # the longer waiter of the near-tie pair climbs
     assert movement["patient-4"] == "down"
 
 
@@ -66,10 +65,10 @@ def test_state_event_feed_covers_every_arrival_rerank_and_allocation(
 
     kinds = [e["kind"] for e in state["events"]]
     assert kinds.count("arrival") == 5
-    assert kinds.count("re-rank") == 4  # every snapshot, including post-allocation
+    assert kinds.count("re-rank") == 5  # every snapshot, including the removal and allocation
+    assert kinds.count("removal") == 2  # the mid-run discharge plus the allocation
     assert "bed-freed" in kinds
     assert "allocation" in kinds
-    assert "removal" in kinds
 
 
 def test_trail_lists_every_record_in_order(client: TestClient) -> None:
@@ -79,15 +78,16 @@ def test_trail_lists_every_record_in_order(client: TestClient) -> None:
         (1, "snapshot"),
         (2, "snapshot"),
         (3, "snapshot"),
-        (4, "decision"),
-        (5, "snapshot"),
+        (4, "snapshot"),
+        (5, "decision"),
+        (6, "snapshot"),
     ]
 
 
 def test_replaying_a_snapshot_record_renders_the_exact_past_queue(
     client: TestClient,
 ) -> None:
-    record = client.get("/api/record/2").json()
+    record = client.get("/api/record/3").json()
 
     assert record["type"] == "snapshot"
     assert record["trigger"] == "tip-arrival"
@@ -95,7 +95,6 @@ def test_replaying_a_snapshot_record_renders_the_exact_past_queue(
     assert [e["patient_id"] for e in record["queue"]] == [
         "patient-5",
         "patient-1",
-        "patient-2",
         "patient-4",
         "patient-3",
     ]
@@ -104,7 +103,7 @@ def test_replaying_a_snapshot_record_renders_the_exact_past_queue(
 def test_replaying_the_decision_record_renders_the_queue_at_allocation(
     client: TestClient,
 ) -> None:
-    record = client.get("/api/record/4").json()
+    record = client.get("/api/record/5").json()
 
     assert record["type"] == "decision"
     assert record["outcome"] == "confirmed"
@@ -135,19 +134,22 @@ def test_patient_history_reports_ranks_across_snapshots(client: TestClient) -> N
 
     assert [(h["snapshot_id"], h["rank"]) for h in history] == [
         (1, 1),
-        (2, 2),
+        (2, 1),
         (3, 2),
-        (5, 1),
+        (4, 2),
+        (6, 1),
     ]
 
 
 def test_demo_scenario_is_loaded_with_a_near_tie_and_tipping_arrival(
     client: TestClient,
 ) -> None:
-    record = client.get("/api/record/2").json()
+    record = client.get("/api/record/3").json()
 
     assert record["queue"][0]["patient_id"] == "patient-5"  # tipping arrival tops the list
-    above, below = record["queue"][3], record["queue"][4]
+    above, below = record["queue"][2], record["queue"][3]
+    assert above["patient_id"] == "patient-4"
+    assert below["patient_id"] == "patient-3"
     assert above["score"] == pytest.approx(below["score"], abs=0.005)
     assert above["tie_break_reason"] is not None
     assert "higher severity" in above["tie_break_reason"]

@@ -134,7 +134,7 @@ class Event:
     detail: str
 
 
-def _weight_breakdown(profile: WeightProfile) -> str:
+def profile_weight_breakdown(profile: WeightProfile) -> str:
     parts = (
         round(profile.severity * 100),
         round(profile.survival * 100),
@@ -150,7 +150,7 @@ def _recommendation_reasoning(view: EntryView, wait_horizon: timedelta) -> str:
         f"{view.patient_id} is ranked #1 with priority score {view.score:.3f} — "
         f"severity {view.severity_factor:.3f}, survival {view.survival_factor:.3f}, "
         f"waiting {_fmt_duration(view.waiting_time)} → {view.waiting_factor:.3f} — "
-        f"under {view.profile.name} ({_weight_breakdown(view.profile)}), "
+        f"under {view.profile.name} ({profile_weight_breakdown(view.profile)}), "
         f"wait horizon {_fmt_duration(wait_horizon)}{reason}"
     )
 

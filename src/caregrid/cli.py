@@ -16,8 +16,15 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 
 from .clock import ManualClock
-from .engine import ArbitrationDecision, Engine, EntryView, RankingSnapshot
+from .engine import (
+    ArbitrationDecision,
+    Engine,
+    EntryView,
+    RankingSnapshot,
+    profile_weight_breakdown,
+)
 from .profile import PRESETS, WeightProfile
+from .scenario import run_simulation
 from .sofa import Sofa
 from .survival import SurvivalModel
 from .survival_model import ModelValidationError, establish_survival_model, SPLIT_SEED
@@ -300,6 +307,52 @@ def _fmt_deviation_suffix(allocated: EntryView, recommended: EntryView, verb: st
     return f" {verb} {recommended.patient_id}"
 
 
+def _profile_by_name(name: str) -> WeightProfile:
+    return next(profile for profile in PRESETS if profile.name == name)
+
+
+def _print_scenario_run(engine: Engine) -> None:
+    """The full Simulation Run replay: every Ranking Snapshot's ordered queue and the decision."""
+    profile = engine.current_queue().profile
+    print(f"Simulation Run — {profile.name} ({profile_weight_breakdown(profile)})")
+    print(
+        "The loaded ICU queue: an exhausted long-waiter, a near-tie pair, and a tipping "
+        "arrival, played through arrivals, a removal, and a freed bed."
+    )
+    print("\nAudit trail (replayable snapshots + the arbitration decision, in order):")
+    for record in engine.trail():
+        if isinstance(record, RankingSnapshot):
+            print(
+                f"\n  #{record.snapshot_id} {record.captured_at:%Y-%m-%d %H:%M} — "
+                f"re-rank: {record.trigger}"
+            )
+            for rank, view in enumerate(record.entries, start=1):
+                suffix = f"  {view.tie_break_reason}" if view.tie_break_reason else ""
+                print(f"    {rank}. {view.patient_id:<10}{view.score:.3f}{suffix}")
+        elif isinstance(record, ArbitrationDecision):
+            deviation = _fmt_deviation_suffix(record.allocated, record.recommended, "deviated from")
+            print(
+                f"\n  #{record.decision_id} {record.recorded_at:%Y-%m-%d %H:%M} — "
+                f"{record.outcome.value}: bed allocated to {record.allocated.patient_id}"
+                f"{deviation}"
+            )
+
+
+def _print_scenario_block(profile: WeightProfile, engine: Engine) -> None:
+    """A compact per-profile comparison line — same scenario, different policy stance."""
+    print(f"\n{profile.name} ({profile_weight_breakdown(profile)})")
+    for record in engine.trail():
+        if isinstance(record, RankingSnapshot):
+            names = ", ".join(view.patient_id for view in record.entries)
+            print(f"  {record.trigger:<14} → {names}")
+        elif isinstance(record, ArbitrationDecision):
+            deviation = _fmt_deviation_suffix(record.allocated, record.recommended, ", deviated from")
+            print(
+                f"  {record.outcome.value:<14} → {record.allocated.patient_id} allocated"
+                f"{deviation}"
+            )
+
+
 def _print_trail(engine: Engine) -> None:
     print("\nAudit trail:")
     for record in engine.trail():
@@ -412,6 +465,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=SPLIT_SEED,
         help=f"hold-out split seed (default: {SPLIT_SEED}, the recorded seed)",
     )
+    scenario_cmd = sub.add_parser(
+        "scenario",
+        help=(
+            "run the Simulation Run end-to-end and print its audit trail; "
+            "gated on the survival model's validation"
+        ),
+    )
+    scenario_cmd.add_argument(
+        "--profile",
+        choices=[p.name for p in PRESETS],
+        default=None,
+        help=(
+            "weight profile to run the scenario under "
+            "(default: all three, compared against the same queue)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.command == "model":
@@ -431,10 +500,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"validation report recorded at {report_path}")
         return 0
 
+    if args.command == "scenario":
+        model = _survival_model()  # the validation gate — no demonstration on a failing model
+        if args.profile:
+            profiles = [_profile_by_name(args.profile)]
+        else:
+            profiles = list(PRESETS)
+        if len(profiles) == 1:
+            engine = run_simulation(profile=profiles[0], model=model)
+            _print_scenario_run(engine)
+        else:
+            print("Simulation Run comparison — the same ICU queue under each weight profile:")
+            for profile in profiles:
+                engine = run_simulation(profile=profile, model=model)
+                _print_scenario_block(profile, engine)
+        return 0
+
     if args.command == "demo":
         base = _base_time()
         model = _survival_model()
-        profile = next(p for p in PRESETS if p.name == args.profile)
+        profile = _profile_by_name(args.profile)
         engine = Engine(survival_model=model, clock=ManualClock(base), profile=profile)
 
         patients = _demand_ward(parser, args)
@@ -455,7 +540,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "allocate":
         base = _base_time()
         model = _survival_model()
-        profile = next(p for p in PRESETS if p.name == args.profile)
+        profile = _profile_by_name(args.profile)
         engine = Engine(survival_model=model, clock=ManualClock(base), profile=profile)
 
         patients = _demand_ward(parser, args)
@@ -502,7 +587,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             engine = Engine(
                 survival_model=_survival_model(),
                 clock=ManualClock(base),
-                profile=next(p for p in PRESETS if p.name == args.profile),
+                profile=_profile_by_name(args.profile),
             )
             patients = _demand_ward(parser, args)
             if args.csv:

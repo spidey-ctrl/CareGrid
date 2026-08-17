@@ -4,10 +4,10 @@
 
 **Blocked by:** 6 — Arbitration Decision workflow; 8 — Survival model harness + validation gate
 
-**Status:** ready-for-agent
+**Status:** resolved (implemented Aug 18 2026)
 
-- [ ] Generates a scenario that deterministically includes the loaded edge cases: near-ties, an exhausted long-waiter, and a tipping arrival
-- [ ] Plays arrivals, removals, and a freed bed through the engine under a selected weight profile
-- [ ] Produces the snapshot trail a reviewer can replay end-to-end
-- [ ] Honours the validation gate from ticket 8 — no demonstration when the model fails
-- [ ] Runnable under all three weight profiles for comparison
+- [x] Generates a scenario that deterministically includes the loaded edge cases: near-ties, an exhausted long-waiter, and a tipping arrival
+- [x] Plays arrivals, removals, and a freed bed through the engine under a selected weight profile
+- [x] Produces the snapshot trail a reviewer can replay end-to-end
+- [x] Honours the validation gate from ticket 8 — no demonstration when the model fails
+- [x] Runnable under all three weight profiles for comparison
