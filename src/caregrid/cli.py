@@ -8,6 +8,8 @@ time). A thin consumer of the domain engine; it holds no decision logic.
 
 import argparse
 import csv
+import json
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -17,7 +19,8 @@ from .clock import ManualClock
 from .engine import ArbitrationDecision, Engine, EntryView, RankingSnapshot
 from .profile import PRESETS, WeightProfile
 from .sofa import Sofa
-from .survival import SurvivalModel, SurvivalPrediction
+from .survival import SurvivalModel
+from .survival_model import ModelValidationError, establish_survival_model, SPLIT_SEED
 
 DEFAULT_WARD: Sequence[tuple[Sofa, int, tuple[str, ...]]] = (
     (Sofa(3, 1, 2, 2, 3, 1), 64, ("diabetes",)),
@@ -48,19 +51,18 @@ class _RawPatient:
     created_at: datetime | None
 
 
-class PlaceholderSurvivalModel:
-    """Deterministic stand-in for the trained survival model, which arrives in ticket 08.
+def _survival_model() -> SurvivalModel:
+    """The validated trained survival model — the demonstration gate.
 
-    Survival falls as severity rises; the engine is agnostic to what sits behind
-    the SurvivalModel adapter seam.
+    Ticket 08: every demonstration path (demo, allocate, serve) refuses to run on a
+    model that fails the hold-out validation tolerance, per spec user story 50.
     """
-
-    def predict(self, sofa: Sofa, age: int, comorbidities: tuple[str, ...]) -> SurvivalPrediction:
-        p = max(0.05, min(0.95, 0.95 - sofa.severity() * 0.03 - age * 0.002))
-        return SurvivalPrediction(
-            probability=round(p, 3),
-            attribution={"sofa_total": round(0.1 - sofa.severity() * 0.01, 3), "age": -0.05},
-        )
+    try:
+        model, _ = establish_survival_model()
+    except ModelValidationError as exc:
+        print(f"demonstration blocked: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    return model
 
 
 def _base_time() -> datetime:
@@ -400,11 +402,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="port to listen on (default: 8000)",
     )
     _add_ward_args(serve)
+    model_cmd = sub.add_parser(
+        "model",
+        help="train & validate the survival model, and gate demonstrations on it",
+    )
+    model_cmd.add_argument(
+        "--seed",
+        type=int,
+        default=SPLIT_SEED,
+        help=f"hold-out split seed (default: {SPLIT_SEED}, the recorded seed)",
+    )
     args = parser.parse_args(argv)
+
+    if args.command == "model":
+        from .survival_model import MODELS_DIR, report_to_dict
+
+        print("training the CPU gradient-boosted survival model…", file=sys.stderr)
+        try:
+            _, report = establish_survival_model(seed=args.seed)
+        except ModelValidationError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(report.describe())
+        print("\nValidation passed — demonstrations allowed.")
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        report_path = MODELS_DIR / "validation_report.json"
+        report_path.write_text(json.dumps(report_to_dict(report), indent=2) + "\n")
+        print(f"validation report recorded at {report_path}")
+        return 0
 
     if args.command == "demo":
         base = _base_time()
-        model = PlaceholderSurvivalModel()
+        model = _survival_model()
         profile = next(p for p in PRESETS if p.name == args.profile)
         engine = Engine(survival_model=model, clock=ManualClock(base), profile=profile)
 
@@ -425,7 +454,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "allocate":
         base = _base_time()
-        model = PlaceholderSurvivalModel()
+        model = _survival_model()
         profile = next(p for p in PRESETS if p.name == args.profile)
         engine = Engine(survival_model=model, clock=ManualClock(base), profile=profile)
 
@@ -471,7 +500,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if getattr(args, "patients", None) or getattr(args, "csv", None):
             base = _base_time()
             engine = Engine(
-                survival_model=PlaceholderSurvivalModel(),
+                survival_model=_survival_model(),
                 clock=ManualClock(base),
                 profile=next(p for p in PRESETS if p.name == args.profile),
             )
@@ -480,7 +509,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"loaded {len(patients)} patients from {args.csv}")
             _register_ward(engine, patients, snapshot=base)
         else:
-            engine = demo_engine()
+            engine = demo_engine(model=_survival_model())
 
         app = create_dashboard_app(engine)
         import uvicorn

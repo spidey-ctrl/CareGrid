@@ -14,17 +14,17 @@ from .clock import ManualClock
 from .engine import Engine
 from .profile import SEVERITY_DOMINANT
 from .sofa import Sofa
-from .survival import SurvivalPrediction
+from .survival import SurvivalModel, SurvivalPrediction
 
 T0 = datetime(2026, 1, 1, 8, 0, tzinfo=timezone.utc)
 
 
 class _DemoSurvivalModel:
-    """Deterministic stand-in until the trained model lands (ticket 08).
+    """Deterministic stand-in kept for tests that must not train the real model.
 
-    Survival is constant so the scenario's scores stay hand-controllable; the
-    SHAP attribution is a fixed illustrative per-feature vector, sized by each
-    SOFA component and age.
+    Since ticket 08 the demonstration paths inject the validated trained model where
+    available; this fake remains only where a demonstration is not being run — unit and
+    dashboard tests that exercise the engine with a fixed, hand-controllable survival.
     """
 
     def predict(self, sofa: Sofa, age: int, comorbidities: tuple[str, ...]) -> SurvivalPrediction:
@@ -40,9 +40,18 @@ class _DemoSurvivalModel:
         )
 
 
-def demo_engine() -> Engine:
+def demo_engine(model: SurvivalModel | None = None) -> Engine:
+    """A deliberately loaded ICU-style queue for the dashboard, under a survival model.
+
+    ``model`` is the validated trained survival model on demonstration paths; with no
+    model passed (tests) the constant hand-controllable stand-in is used instead.
+    """
     clock = ManualClock(T0)
-    engine = Engine(survival_model=_DemoSurvivalModel(), clock=clock, profile=SEVERITY_DOMINANT)
+    engine = Engine(
+        survival_model=model if model is not None else _DemoSurvivalModel(),
+        clock=clock,
+        profile=SEVERITY_DOMINANT,
+    )
 
     def admit(sofa: Sofa, age: int, at: datetime) -> str:
         clock.set(at)

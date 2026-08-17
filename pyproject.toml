@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 [project.optional-dependencies]
 web = ["fastapi>=0.115", "uvicorn>=0.30"]
 test = ["httpx>=0.27"]
+model = ["xgboost>=2.0"]
 
 [project.scripts]
 caregrid = "caregrid.cli:main"
@@ -20,6 +21,6 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 files = ["src", "tests"]
