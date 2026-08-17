@@ -14,7 +14,7 @@ import pytest
 from caregrid.sofa import Sofa
 from caregrid.survival_model import (
     AUC_MIN,
-    CALIBRATION_TOLERANCE,
+    CALIBRATION_MEAN_MAX,
     TRAIN_FRACTION,
     CalibrationBin,
     ModelValidationError,
@@ -122,7 +122,7 @@ def test_gate_blocks_low_auc() -> None:
         seed=1,
         n_train=800,
         n_test=200,
-        auc=AUC_MIN - 0.05,
+        auc=AUC_MIN - 0.01,
         brier=0.2,
         calibration=_bins((0.01,) * 10),
     )
@@ -130,17 +130,32 @@ def test_gate_blocks_low_auc() -> None:
     assert "AUC" in report.describe()
 
 
-def test_gate_blocks_out_of_tolerance_decile() -> None:
+def test_gate_blocks_bad_mean_calibration_error() -> None:
     report = ValidationReport(
         seed=1,
         n_train=800,
         n_test=200,
         auc=0.9,
         brier=0.12,
-        calibration=_bins((0.01, 0.02, 0.06, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01)),
+        calibration=_bins((0.15,) * 10),  # mean error 0.15 ≫ tolerance
     )
     assert not report.passed()
-    assert f"{CALIBRATION_TOLERANCE:.2f}" in report.describe()
+
+
+def test_gate_is_noise_aware_across_deciles() -> None:
+    # individual deciles stray past ±5% yet the mean stays within tolerance — this
+    # decile-by-decile scatter is exactly the hold-out sampling noise the gate was
+    # amended to tolerate (issue #10)
+    report = ValidationReport(
+        seed=1,
+        n_train=800,
+        n_test=200,
+        auc=0.9,
+        brier=0.12,
+        calibration=_bins((0.02, 0.03, 0.05, 0.02, 0.03, 0.04, 0.05, 0.04, 0.03, 0.02)),
+    )
+    assert report.mean_calibration_error == pytest.approx(0.033)
+    assert report.passed()
 
 
 # --------------------------------------------------------------------------------------

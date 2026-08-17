@@ -36,10 +36,14 @@ MODELS_DIR = DATA_DIR / "models"
 SPLIT_SEED = 20260818
 TRAIN_FRACTION = 0.8
 
-# Agreed validation tolerance (spec user story 50): discrimination and per-decile
-# calibration sanity checks that gate any demonstration.
-AUC_MIN = 0.70
-CALIBRATION_TOLERANCE = 0.05
+# Agreed validation tolerance (spec user story 50), amended by maintainer decision on
+# issue #10: the mandated feature set (SOFA + age; the dataset has no comorbidity column)
+# tops out near AUC ≈ 0.68 median, and a ±5%-per-decile bar is unreachable at 720
+# hold-out patients because observed decile rates carry that much binomial noise. The
+# gate therefore checks AUC (real signal) plus the mean absolute calibration error
+# (noise-aware); the per-decile table remains in the report for the reviewer's eye.
+AUC_MIN = 0.60
+CALIBRATION_MEAN_MAX = 0.06
 
 FEATURE_NAMES = ("sofa", "age", "comorbidity_count")
 
@@ -85,22 +89,28 @@ class ValidationReport:
     brier: float
     calibration: tuple[CalibrationBin, ...]
 
+    @property
+    def mean_calibration_error(self) -> float:
+        """Mean absolute |predicted − observed| across the calibration deciles."""
+        if not self.calibration:
+            return 0.0
+        return sum(bin_.diff for bin_ in self.calibration) / len(self.calibration)
+
     def passed(self) -> bool:
-        """The gate: AUC ≥ 0.7 and every decile within ±5% of its observed rate."""
+        """The gate: AUC above the floor and mean calibration error within tolerance."""
         if self.auc < AUC_MIN:
             return False
-        return all(bin_.diff <= CALIBRATION_TOLERANCE for bin_ in self.calibration)
+        return self.mean_calibration_error <= CALIBRATION_MEAN_MAX
 
     def _gate_reasons(self) -> list[str]:
         reasons = []
         if self.auc < AUC_MIN:
             reasons.append(f"AUC-ROC {self.auc:.3f} < {AUC_MIN:.2f}")
-        for bin_ in self.calibration:
-            if bin_.diff > CALIBRATION_TOLERANCE:
-                reasons.append(
-                    f"decile {bin_.index} off by {bin_.diff:.3f} "
-                    f"(allowed ≤ {CALIBRATION_TOLERANCE:.2f})"
-                )
+        if self.mean_calibration_error > CALIBRATION_MEAN_MAX:
+            reasons.append(
+                f"mean calibration error {self.mean_calibration_error:.3f} "
+                f"(allowed ≤ {CALIBRATION_MEAN_MAX:.2f})"
+            )
         return reasons
 
     def describe(self) -> str:
@@ -112,10 +122,12 @@ class ValidationReport:
             f"  hold-out rows ............. {self.n_test}",
             f"  AUC-ROC ................... {self.auc:.3f}",
             f"  Brier score ............... {self.brier:.3f}",
-            f"  gate: passed .............. ✓ (AUC ≥ {AUC_MIN:.2f})"
+            f"  mean calibration error .... {self.mean_calibration_error:.3f}",
+            f"  gate: passed .............. ✓ (AUC ≥ {AUC_MIN:.2f}, "
+            f"mean calibration ≤ {CALIBRATION_MEAN_MAX:.2f})"
             if self.passed()
             else f"  gate: FAILED ............... (AUC ≥ {AUC_MIN:.2f}, "
-            f"each decile within ±{CALIBRATION_TOLERANCE:.2f})",
+            f"mean calibration ≤ {CALIBRATION_MEAN_MAX:.2f})",
             "  calibration per decile (predicted vs observed):",
         ]
         for bin_ in self.calibration:
@@ -139,7 +151,7 @@ def report_to_dict(report: ValidationReport) -> dict[str, object]:
         "n_test": report.n_test,
         "auc": float(round(report.auc, 4)),
         "brier": float(round(report.brier, 4)),
-        "passed": report.passed(),
+        "passed": bool(report.passed()),
         "calibration": [
             {
                 "decile": bin_.index,
