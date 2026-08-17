@@ -292,6 +292,12 @@ def _print_queue(views: Sequence[EntryView]) -> None:
         print(_format(rank, view))
 
 
+def _fmt_deviation_suffix(allocated: EntryView, recommended: EntryView, verb: str) -> str:
+    if allocated.entry_id == recommended.entry_id:
+        return ""
+    return f" {verb} {recommended.patient_id}"
+
+
 def _print_trail(engine: Engine) -> None:
     print("\nAudit trail:")
     for record in engine.trail():
@@ -305,15 +311,10 @@ def _print_trail(engine: Engine) -> None:
                 summary += f", top {top.patient_id} {top.score:.3f}"
             print(summary)
         elif isinstance(record, ArbitrationDecision):
-            change = (
-                ""
-                if record.allocated.entry_id == record.recommended.entry_id
-                else f" (deviated from {record.recommended.patient_id})"
-            )
             print(
                 f"  #{record.decision_id} {record.recorded_at:%Y-%m-%d %H:%M} "
-                f"{record.trigger:<12} {record.outcome.value}: "
-                f"{record.allocated.patient_id}{change}"
+                f"{record.trigger:<12} {record.outcome.value}: {record.allocated.patient_id}"
+                f"{_fmt_deviation_suffix(record.allocated, record.recommended, 'deviated from')}"
             )
 
 
@@ -431,10 +432,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             decision = engine.confirm_allocation(recommendation, note=args.note)
 
-        change = (
-            ""
-            if decision.allocated.entry_id == decision.recommended.entry_id
-            else f" (deviation from {decision.recommended.patient_id})"
+        change = _fmt_deviation_suffix(
+            decision.allocated, decision.recommended, "deviation from"
         )
         print(
             f"{decision.outcome.value.capitalize()}: bed allocated to "
