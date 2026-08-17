@@ -243,13 +243,14 @@ def _format(rank: int, view: EntryView) -> str:
         f"{rank:<5}{view.patient_id:<11}{view.score:<7.3f}{view.severity_factor:<7.3f}"
         f"{view.survival_factor:<7.3f}{view.waiting_factor:<7.3f}{_fmt_wait(view.waiting_time):<10}"
         f"{view.survival_probability:<7.3f} {view.profile.name}"
+        f"{'  ' + view.tie_break_reason if view.tie_break_reason else ''}"
     )
 
 
 def _print_queue(views: Sequence[EntryView]) -> None:
     header = (
         f"{'rank':<5}{'patient':<11}{'score':<7}{'sev_f':<7}{'surv_f':<7}"
-        f"{'wait_f':<7}{'waiting':<10}{'p_surv':<7} profile"
+        f"{'wait_f':<7}{'waiting':<10}{'p_surv':<7} profile  tie-break"
     )
     print(header)
     for rank, view in enumerate(views, start=1):

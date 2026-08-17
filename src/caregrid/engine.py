@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Mapping, Protocol
 
@@ -11,6 +11,11 @@ PatientId = str
 EntryId = str
 
 DEFAULT_WAIT_HORIZON = timedelta(hours=24)
+
+
+def _fmt_duration(delta: timedelta) -> str:
+    hours = delta.total_seconds() / 3600
+    return f"{hours:g}h"
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,7 @@ class EntryView:
     waiting_time: timedelta
     created_at: datetime
     profile: WeightProfile
+    tie_break_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,14 +123,60 @@ class Engine:
 
     def current_queue(self) -> QueueView:
         now = self._clock.now()
-        entries = tuple(
-            sorted(
-                (self._entry_view(e, now) for e in self._entries.values()),
-                key=lambda v: v.score,
-                reverse=True,
+        views = [self._entry_view(e, now) for e in self._entries.values()]
+        views.sort(
+            key=lambda v: (
+                -round(v.score, 2),
+                -v.severity_factor,
+                -v.survival_factor,
+                -v.waiting_factor,
+                v.created_at,
             )
         )
-        return QueueView(profile=self._profile, wait_horizon=self._wait_horizon, entries=entries)
+        self._annotate_ties(views)
+        return QueueView(profile=self._profile, wait_horizon=self._wait_horizon, entries=tuple(views))
+
+    def _annotate_ties(self, views: list[EntryView]) -> None:
+        """Walk each group of equal-rounded scores and record how each member beat the next.
+
+        Entries only a few hundredths apart in score never share a group, so the
+        cascade only ever explains genuinely near-equal orderings.
+        """
+        i = 0
+        while i < len(views):
+            j = i + 1
+            while j < len(views) and round(views[j].score, 2) == round(views[i].score, 2):
+                j += 1
+            for k in range(i, j - 1):
+                reason = self._tie_break_reason(views[k], views[k + 1])
+                if reason is not None:
+                    views[k] = replace(views[k], tie_break_reason=reason)
+            i = j
+
+    @staticmethod
+    def _tie_break_reason(above: EntryView, below: EntryView) -> str | None:
+        """The cascade stage that ranks `above` ahead of `below`, or None if fully tied."""
+        if above.severity_factor != below.severity_factor:
+            return (
+                "tie-break: higher severity "
+                f"({above.severity_factor:.3f} vs {below.severity_factor:.3f})"
+            )
+        if above.survival_factor != below.survival_factor:
+            return (
+                "tie-break: higher survival "
+                f"({above.survival_factor:.3f} vs {below.survival_factor:.3f})"
+            )
+        if above.waiting_factor != below.waiting_factor:
+            return (
+                "tie-break: longer wait "
+                f"({_fmt_duration(above.waiting_time)} vs {_fmt_duration(below.waiting_time)})"
+            )
+        if above.created_at != below.created_at:
+            return (
+                "tie-break: earlier entry "
+                f"({above.created_at.isoformat(timespec='seconds')})"
+            )
+        return None
 
     def _waiting_factor(self, waiting_time: timedelta) -> float:
         ratio = waiting_time / self._wait_horizon
