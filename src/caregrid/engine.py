@@ -56,11 +56,27 @@ class QueueView:
     entries: tuple[EntryView, ...]
 
 
+@dataclass(frozen=True)
+class RankingSnapshot:
+    """An immutable, append-only audit record of one re-rank's full outcome."""
+
+    snapshot_id: int
+    captured_at: datetime
+    trigger: str
+    profile: WeightProfile
+    wait_horizon: timedelta
+    entries: tuple[EntryView, ...]
+
+
 class UnknownPatient(ValueError):
     pass
 
 
 class UnknownEntry(ValueError):
+    pass
+
+
+class UnknownSnapshot(ValueError):
     pass
 
 
@@ -88,8 +104,10 @@ class Engine:
         self._wait_horizon = wait_horizon if wait_horizon is not None else DEFAULT_WAIT_HORIZON
         self._patients: dict[PatientId, Patient] = {}
         self._entries: dict[EntryId, _QueueEntry] = {}
+        self._snapshots: tuple[RankingSnapshot, ...] = ()
         self._next_patient = 1
         self._next_entry = 1
+        self._next_snapshot = 1
 
     def register_patient(
         self, *, sofa: Sofa, age: int, comorbidities: tuple[str, ...]
@@ -122,7 +140,13 @@ class Engine:
         del self._entries[entry_id]
 
     def current_queue(self) -> QueueView:
-        now = self._clock.now()
+        return QueueView(
+            profile=self._profile,
+            wait_horizon=self._wait_horizon,
+            entries=tuple(self._rank(self._clock.now())),
+        )
+
+    def _rank(self, now: datetime) -> list[EntryView]:
         views = [self._entry_view(e, now) for e in self._entries.values()]
         views.sort(
             key=lambda v: (
@@ -134,7 +158,47 @@ class Engine:
             )
         )
         self._annotate_ties(views)
-        return QueueView(profile=self._profile, wait_horizon=self._wait_horizon, entries=tuple(views))
+        return views
+
+    def snapshot(self, trigger: str) -> RankingSnapshot:
+        """Re-rank under the current profile and append an immutable record to the trail."""
+        now = self._clock.now()
+        record = RankingSnapshot(
+            snapshot_id=self._next_snapshot,
+            captured_at=now,
+            trigger=trigger,
+            profile=self._profile,
+            wait_horizon=self._wait_horizon,
+            entries=tuple(self._rank(now)),
+        )
+        self._snapshots = (*self._snapshots, record)
+        self._next_snapshot += 1
+        return record
+
+    def trail(self) -> tuple[RankingSnapshot, ...]:
+        """The append-only audit trail, in creation order."""
+        return self._snapshots
+
+    def snapshot_at(self, snapshot_id: int) -> RankingSnapshot:
+        """The stored record for a past re-rank, without replaying any events."""
+        for record in self._snapshots:
+            if record.snapshot_id == snapshot_id:
+                return record
+        raise UnknownSnapshot(snapshot_id)
+
+    def patient_rank_history(
+        self, patient_id: PatientId
+    ) -> tuple[tuple[RankingSnapshot, int], ...]:
+        """Every snapshot the Patient was ranked in, with their 1-based rank at the time."""
+        if patient_id not in self._patients:
+            raise UnknownPatient(patient_id)
+        history: list[tuple[RankingSnapshot, int]] = []
+        for record in self._snapshots:
+            for rank, entry in enumerate(record.entries, start=1):
+                if entry.patient_id == patient_id:
+                    history.append((record, rank))
+                    break
+        return tuple(history)
 
     def _annotate_ties(self, views: list[EntryView]) -> None:
         """Walk each group of equal-rounded scores and record how each member beat the next.

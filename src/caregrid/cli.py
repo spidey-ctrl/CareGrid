@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 
 from .clock import ManualClock
-from .engine import Engine, EntryView
+from .engine import Engine, EntryView, RankingSnapshot
 from .profile import PRESETS, WeightProfile
 from .sofa import Sofa
 from .survival import SurvivalModel, SurvivalPrediction
@@ -257,6 +257,16 @@ def _print_queue(views: Sequence[EntryView]) -> None:
         print(_format(rank, view))
 
 
+def _print_trail(engine: Engine) -> None:
+    print("\nRanking trail:")
+    for snap in engine.trail():
+        top = snap.entries[0] if snap.entries else None
+        summary = f"  #{snap.snapshot_id} {snap.captured_at:%Y-%m-%d %H:%M} {snap.trigger:<12} {len(snap.entries)} entries"
+        if top:
+            summary += f", top {top.patient_id} {top.score:.3f}"
+        print(summary)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="caregrid",
@@ -328,12 +338,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             patients = raw
 
         _register_ward(engine, patients, snapshot=base)
-        _print_queue(engine.current_queue().entries)
+        _print_queue(engine.snapshot("initial").entries)
 
         if args.advance_hours:
             print(f"\nafter {args.advance_hours:g} hours:\n")
             cast(ManualClock, engine._clock).advance(timedelta(hours=args.advance_hours))  # noqa: SLF001
-            _print_queue(engine.current_queue().entries)
+            _print_queue(engine.snapshot("wait-elapsed").entries)
+
+        _print_trail(engine)
         return 0
 
     parser.error(f"unknown command '{args.command}'")

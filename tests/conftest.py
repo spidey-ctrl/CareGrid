@@ -23,6 +23,18 @@ class FakeSurvivalModel:
         )
 
 
+class MapSurvivalModel:
+    """Per-severity survival probabilities, so tests can stage near-ties by hand."""
+
+    def __init__(self, probabilities: dict[int, float]) -> None:
+        self.probabilities = probabilities
+
+    def predict(self, sofa: Sofa, age: int, comorbidities: tuple[str, ...]) -> SurvivalPrediction:
+        return SurvivalPrediction(
+            probability=self.probabilities[sofa.severity()], attribution={}
+        )
+
+
 @pytest.fixture
 def clock() -> ManualClock:
     return ManualClock(T0)
