@@ -1,0 +1,3 @@
+# Audit trail is full snapshots per re-rank, not an event delta log
+
+Every re-rank writes an immutable, append-only Ranking Snapshot: the ordered queue with per-entry score and factor breakdown, SHAP attribution, the Weight Profile and wait horizon in effect, the trigger, and tie-break reasoning. We chose full snapshots over an event-with-deltas log because "later review" means answering "who ranked where, why, and who changed it" for any past moment as a direct read, not a replay. Storage cost is negligible at ICU queue sizes; the alternative gambles audit friction against marginally lower disk use.

@@ -1,0 +1,3 @@
+# Survival factor favors greater benefit, not rescue
+
+The composite score's survival term weights predicted survival probability *positively* — among equally severe patients, the one more likely to survive gains priority ("save the most lives"), rather than prioritizing the worst-off. We chose this because severity already escalates the sickest (SOFA term), and rescue-first would double-count acuity and steer beds toward patients least likely to reclaim them. A future reader must not assume the survival term points at the sickest.

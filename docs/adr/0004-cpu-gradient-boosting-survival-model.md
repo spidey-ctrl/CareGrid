@@ -1,0 +1,3 @@
+# Survival model is CPU-only gradient boosting with SHAP support
+
+ICU survival prediction is small-scale tabular classification, so the survival likelihood model is a gradient-boosted tree (XGBoost/LightGBM) trained on a laptop CPU — no GPU, no deep learning. We rejected deep models and neural approaches specifically because (a) tabular outcome prediction gains nothing from them at this size, (b) the environment has no GPU, and (c) SHAP attribution, which the explainability and audit requirements depend on, is native to tree ensembles but murky for neural nets.

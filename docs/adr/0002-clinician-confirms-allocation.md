@@ -1,0 +1,3 @@
+# Suggest, don't allocate: the clinician confirms every bed assignment
+
+On a freed bed the system recommends the top-ranked Queue Entry with full reasoning; the clinician confirms or consciously deviates, and the deviation is captured in the audit trail. We deliberately rejected auto-allocation (and advisory-only rankings) because the problem statement requires the final decision to remain with the clinician while still demonstrating the arbitration end-to-end. This makes CareGrid decision-support with an auditable human veto, not a bed-dispatch automation.
