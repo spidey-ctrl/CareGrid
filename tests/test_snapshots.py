@@ -10,6 +10,7 @@ from caregrid import (
     BALANCED,
     Engine,
     ManualClock,
+    RankingSnapshot,
     SEVERITY_DOMINANT,
     SEVERITY_HEAVY,
     Sofa,
@@ -43,9 +44,10 @@ def test_snapshots_append_in_creation_order(clock: ManualClock) -> None:
     third = engine.snapshot("profile-change")
 
     trail = engine.trail()
+    snapshots = [s for s in trail if isinstance(s, RankingSnapshot)]
 
-    assert [s.snapshot_id for s in trail] == [1, 2, 3]
-    assert [s.captured_at for s in trail] == [
+    assert [s.snapshot_id for s in snapshots] == [1, 2, 3]
+    assert [s.captured_at for s in snapshots] == [
         first.captured_at,
         second.captured_at,
         third.captured_at,

@@ -1,5 +1,6 @@
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Mapping, Protocol
 
 from .clock import Clock
@@ -68,6 +69,66 @@ class RankingSnapshot:
     entries: tuple[EntryView, ...]
 
 
+@dataclass(frozen=True)
+class Recommendation:
+    """The engine's suggested allocation for a freed bed, carrying its full reasoning."""
+
+    trigger: str
+    entry: EntryView
+    queue: tuple[EntryView, ...]
+    reasoning: str
+
+
+class ArbitrationOutcome(Enum):
+    CONFIRMED = "confirmed"
+    DEVIATION = "deviation"
+
+
+@dataclass(frozen=True)
+class ArbitrationDecision:
+    """The record of one bed assignment, appended to the same trail as the snapshots.
+
+    Always carries what was recommended and what the clinician actually allocated, so a
+    deliberate deviation is visible at a glance and every assignment is self-contained.
+    """
+
+    decision_id: int
+    recorded_at: datetime
+    trigger: str
+    outcome: ArbitrationOutcome
+    profile: WeightProfile
+    wait_horizon: timedelta
+    queue: tuple[EntryView, ...]
+    recommended: EntryView
+    allocated: EntryView
+    reasoning: str
+    note: str | None = None
+
+
+TrailRecord = RankingSnapshot | ArbitrationDecision
+
+
+def _weight_breakdown(profile: WeightProfile) -> str:
+    parts = (
+        round(profile.severity * 100),
+        round(profile.survival * 100),
+        round(profile.waiting * 100),
+    )
+    return "/".join(str(p) for p in parts)
+
+
+def _recommendation_reasoning(view: EntryView, wait_horizon: timedelta) -> str:
+    """The human-readable 'why this entry' that rides on every freed-bed recommendation."""
+    reason = f"; {view.tie_break_reason}" if view.tie_break_reason else ""
+    return (
+        f"{view.patient_id} is ranked #1 with priority score {view.score:.3f} — "
+        f"severity {view.severity_factor:.3f}, survival {view.survival_factor:.3f}, "
+        f"waiting {_fmt_duration(view.waiting_time)} → {view.waiting_factor:.3f} — "
+        f"under {view.profile.name} ({_weight_breakdown(view.profile)}), "
+        f"wait horizon {_fmt_duration(wait_horizon)}{reason}"
+    )
+
+
 class UnknownPatient(ValueError):
     pass
 
@@ -77,6 +138,22 @@ class UnknownEntry(ValueError):
 
 
 class UnknownSnapshot(ValueError):
+    pass
+
+
+class UnknownDecision(ValueError):
+    pass
+
+
+class EmptyQueue(ValueError):
+    pass
+
+
+class StaleRecommendation(ValueError):
+    pass
+
+
+class InvalidDeviation(ValueError):
     pass
 
 
@@ -104,10 +181,10 @@ class Engine:
         self._wait_horizon = wait_horizon if wait_horizon is not None else DEFAULT_WAIT_HORIZON
         self._patients: dict[PatientId, Patient] = {}
         self._entries: dict[EntryId, _QueueEntry] = {}
-        self._snapshots: tuple[RankingSnapshot, ...] = ()
+        self._trail: tuple[TrailRecord, ...] = ()
         self._next_patient = 1
         self._next_entry = 1
-        self._next_snapshot = 1
+        self._next_trail = 1
 
     def register_patient(
         self, *, sofa: Sofa, age: int, comorbidities: tuple[str, ...]
@@ -164,27 +241,128 @@ class Engine:
         """Re-rank under the current profile and append an immutable record to the trail."""
         now = self._clock.now()
         record = RankingSnapshot(
-            snapshot_id=self._next_snapshot,
+            snapshot_id=self._next_trail,
             captured_at=now,
             trigger=trigger,
             profile=self._profile,
             wait_horizon=self._wait_horizon,
             entries=tuple(self._rank(now)),
         )
-        self._snapshots = (*self._snapshots, record)
-        self._next_snapshot += 1
+        self._trail = (*self._trail, record)
+        self._next_trail += 1
         return record
 
-    def trail(self) -> tuple[RankingSnapshot, ...]:
+    def recommend(self, trigger: str = "bed-freed") -> Recommendation:
+        """Produce the recommendation for the current top-ranked entry, without allocating."""
+        now = self._clock.now()
+        queue = tuple(self._rank(now))
+        if not queue:
+            raise EmptyQueue("cannot recommend a freed bed — the queue is empty")
+        top = queue[0]
+        return Recommendation(
+            trigger=trigger,
+            entry=top,
+            queue=queue,
+            reasoning=_recommendation_reasoning(top, self._wait_horizon),
+        )
+
+    def confirm_allocation(
+        self, recommendation: Recommendation, *, note: str | None = None
+    ) -> ArbitrationDecision:
+        """Allocate the recommended entry to the freed bed and record the confirmation."""
+        return self._allocate(
+            recommendation, allocated_entry_id=recommendation.entry.entry_id, note=note
+        )
+
+    def deviate_allocation(
+        self,
+        recommendation: Recommendation,
+        allocated_entry_id: EntryId,
+        *,
+        note: str | None = None,
+    ) -> ArbitrationDecision:
+        """Allocate a lower-ranked entry at the clinician's deliberate choice (ADR-0002)."""
+        if allocated_entry_id == recommendation.entry.entry_id:
+            raise InvalidDeviation(
+                f"{recommendation.entry.entry_id} is the recommended entry — "
+                "allocation follows the recommendation, so use confirm_allocation"
+            )
+        return self._allocate(
+            recommendation, allocated_entry_id=allocated_entry_id, note=note
+        )
+
+    def _allocate(
+        self, recommendation: Recommendation, allocated_entry_id: EntryId, *, note: str | None
+    ) -> ArbitrationDecision:
+        """Append the allocation decision to the trail, then let the allocated entry leave.
+
+        The clinician's choice always wins (ADR-0002): a confirmation allocates the
+        recommended entry, a deviation allocates the lower-ranked entry the clinician
+        consciously picked instead.
+        """
+        now = self._clock.now()
+        queue = tuple(self._rank(now))
+        recommended_view = next(
+            (v for v in queue if v.entry_id == recommendation.entry.entry_id), None
+        )
+        if recommended_view is None:
+            raise StaleRecommendation(
+                f"{recommendation.entry.entry_id} is no longer in the queue — "
+                "request a fresh recommendation"
+            )
+        allocated_view = next((v for v in queue if v.entry_id == allocated_entry_id), None)
+        if allocated_view is None:
+            raise UnknownEntry(allocated_entry_id)
+
+        if allocated_view.entry_id == recommended_view.entry_id:
+            outcome = ArbitrationOutcome.CONFIRMED
+        else:
+            ranks = {
+                v.entry_id: rank for rank, v in enumerate(queue, start=1)
+            }
+            if ranks[allocated_view.entry_id] <= ranks[recommended_view.entry_id]:
+                raise InvalidDeviation(
+                    f"{allocated_view.entry_id} (rank #{ranks[allocated_view.entry_id]}) "
+                    f"is not below the recommended {recommended_view.entry_id} "
+                    f"(rank #{ranks[recommended_view.entry_id]})"
+                )
+            outcome = ArbitrationOutcome.DEVIATION
+
+        decision = ArbitrationDecision(
+            decision_id=self._next_trail,
+            recorded_at=now,
+            trigger=recommendation.trigger,
+            outcome=outcome,
+            profile=self._profile,
+            wait_horizon=self._wait_horizon,
+            queue=queue,
+            recommended=recommended_view,
+            allocated=allocated_view,
+            reasoning=recommendation.reasoning,
+            note=note,
+        )
+        self._trail = (*self._trail, decision)
+        self._next_trail += 1
+        self.close_entry(allocated_view.entry_id)
+        return decision
+
+    def trail(self) -> tuple[TrailRecord, ...]:
         """The append-only audit trail, in creation order."""
-        return self._snapshots
+        return self._trail
 
     def snapshot_at(self, snapshot_id: int) -> RankingSnapshot:
-        """The stored record for a past re-rank, without replaying any events."""
-        for record in self._snapshots:
-            if record.snapshot_id == snapshot_id:
+        """The stored snapshot for a past re-rank, without replaying any events."""
+        for record in self._trail:
+            if isinstance(record, RankingSnapshot) and record.snapshot_id == snapshot_id:
                 return record
         raise UnknownSnapshot(snapshot_id)
+
+    def decision_at(self, decision_id: int) -> ArbitrationDecision:
+        """The stored Arbitration Decision for a past bed assignment, without replaying."""
+        for record in self._trail:
+            if isinstance(record, ArbitrationDecision) and record.decision_id == decision_id:
+                return record
+        raise UnknownDecision(decision_id)
 
     def patient_rank_history(
         self, patient_id: PatientId
@@ -193,7 +371,9 @@ class Engine:
         if patient_id not in self._patients:
             raise UnknownPatient(patient_id)
         history: list[tuple[RankingSnapshot, int]] = []
-        for record in self._snapshots:
+        for record in self._trail:
+            if not isinstance(record, RankingSnapshot):
+                continue
             for rank, entry in enumerate(record.entries, start=1):
                 if entry.patient_id == patient_id:
                     history.append((record, rank))

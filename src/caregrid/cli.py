@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 
 from .clock import ManualClock
-from .engine import Engine, EntryView, RankingSnapshot
+from .engine import ArbitrationDecision, Engine, EntryView, RankingSnapshot
 from .profile import PRESETS, WeightProfile
 from .sofa import Sofa
 from .survival import SurvivalModel, SurvivalPrediction
@@ -231,6 +231,41 @@ def _register_ward(engine: Engine, patients: Sequence[_RawPatient], snapshot: da
     clock.advance(snapshot - clock.now())
 
 
+def _demand_ward(parser: argparse.ArgumentParser, args: argparse.Namespace) -> list[_RawPatient]:
+    """Resolve the ward for a subcommand: CSV load or positional patient specs."""
+    if getattr(args, "csv", None):
+        if getattr(args, "patients", None):
+            parser.error("cannot combine positional PATIENT specs with --csv")
+        loaded = _load_csv(args.csv, getattr(args, "limit", None))
+        if not loaded:
+            print("no usable rows loaded — check the SOFA/Age columns")
+            raise SystemExit(1)
+        return _apply_stagger(loaded, _base_time(), getattr(args, "stagger_hours", 0) or 0)
+    if getattr(args, "stagger_hours", 0):
+        parser.error("--stagger-hours only applies to --csv loads")
+    raw = (
+        [_parse_patient(p) for p in args.patients]
+        if getattr(args, "patients", None)
+        else [
+            _RawPatient(sofa=s, age=a, comorbidities=c, created_at=None)
+            for s, a, c in DEFAULT_WARD
+        ]
+    )
+    return raw
+
+
+def _entry_spec(engine: Engine, spec: str) -> str:
+    """Resolve a --deviate argument: an entry id, or the current entry of a named patient."""
+    if spec in {e.entry_id for e in engine.current_queue().entries}:
+        return spec
+    matches = [e.entry_id for e in engine.current_queue().entries if e.patient_id == spec]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise SystemExit(f"'{spec}' is neither an entry id nor a queued patient id")
+    raise SystemExit(f"'{spec}' matches multiple queued entries — pass an entry id")
+
+
 def _fmt_wait(waiting_time: timedelta) -> str:
     total_hours = waiting_time.total_seconds() / 3600
     days = int(total_hours // 24)
@@ -258,13 +293,62 @@ def _print_queue(views: Sequence[EntryView]) -> None:
 
 
 def _print_trail(engine: Engine) -> None:
-    print("\nRanking trail:")
-    for snap in engine.trail():
-        top = snap.entries[0] if snap.entries else None
-        summary = f"  #{snap.snapshot_id} {snap.captured_at:%Y-%m-%d %H:%M} {snap.trigger:<12} {len(snap.entries)} entries"
-        if top:
-            summary += f", top {top.patient_id} {top.score:.3f}"
-        print(summary)
+    print("\nAudit trail:")
+    for record in engine.trail():
+        if isinstance(record, RankingSnapshot):
+            top = record.entries[0] if record.entries else None
+            summary = (
+                f"  #{record.snapshot_id} {record.captured_at:%Y-%m-%d %H:%M} "
+                f"{record.trigger:<12} snapshot: {len(record.entries)} entries"
+            )
+            if top:
+                summary += f", top {top.patient_id} {top.score:.3f}"
+            print(summary)
+        elif isinstance(record, ArbitrationDecision):
+            change = (
+                ""
+                if record.allocated.entry_id == record.recommended.entry_id
+                else f" (deviated from {record.recommended.patient_id})"
+            )
+            print(
+                f"  #{record.decision_id} {record.recorded_at:%Y-%m-%d %H:%M} "
+                f"{record.trigger:<12} {record.outcome.value}: "
+                f"{record.allocated.patient_id}{change}"
+            )
+
+
+def _add_ward_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "patients",
+        nargs="*",
+        metavar="PATIENT",
+        help=(
+            "custom patient spec: six SOFA organ components (0-4), age, optional "
+            "comorbidities; e.g. '3,1,2,2,3,1,64,diabetes;COPD'. Defaults to a demo ward."
+        ),
+    )
+    parser.add_argument(
+        "--csv",
+        metavar="PATH",
+        help=(
+            "load a ward from CSV instead; uses six SOFA organ columns, or a SOFA "
+            "total column; Age is required; optional comorbidity/comorbidities and "
+            "arrival_date/created_at columns"
+        ),
+    )
+    parser.add_argument("--limit", type=int, metavar="N", help="only load the first N CSV rows")
+    parser.add_argument(
+        "--stagger-hours",
+        type=int,
+        metavar="H",
+        help="for CSV loads without arrival dates, space each arrival H hours apart",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=[p.name for p in PRESETS],
+        default=PRESETS[0].name,
+        help=f"weight profile to score under (default: {PRESETS[0].name})",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -274,42 +358,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     demo = sub.add_parser("demo", help="print the ranked ICU queue for a ward")
-    demo.add_argument(
-        "patients",
-        nargs="*",
-        metavar="PATIENT",
-        help=(
-            "custom patient spec: six SOFA organ components (0-4), age, optional "
-            "comorbidities; e.g. '3,1,2,2,3,1,64,diabetes;COPD'. Defaults to a demo ward."
-        ),
-    )
-    demo.add_argument(
-        "--csv",
-        metavar="PATH",
-        help=(
-            "load a ward from CSV instead; uses six SOFA organ columns, or a SOFA "
-            "total column; Age is required; optional comorbidity/comorbidities and "
-            "arrival_date/created_at columns"
-        ),
-    )
-    demo.add_argument("--limit", type=int, metavar="N", help="only load the first N CSV rows")
-    demo.add_argument(
-        "--stagger-hours",
-        type=int,
-        metavar="H",
-        help="for CSV loads without arrival dates, space each arrival H hours apart",
-    )
+    _add_ward_args(demo)
     demo.add_argument(
         "--advance-hours",
         type=float,
         metavar="H",
         help="after ranking, advance the clock H hours and print the re-ranked queue",
     )
-    demo.add_argument(
-        "--profile",
-        choices=[p.name for p in PRESETS],
-        default=PRESETS[0].name,
-        help=f"weight profile to score under (default: {PRESETS[0].name})",
+    allocate = sub.add_parser(
+        "allocate",
+        help="recommend the top entry for a freed bed and record the clinician's decision",
+    )
+    _add_ward_args(allocate)
+    allocate.add_argument(
+        "--deviate",
+        metavar="ENTRY_OR_PATIENT",
+        help=(
+            "deviate to this lower-ranked entry instead of confirming the recommendation; "
+            "accepts an entry id or a queued patient id"
+        ),
+    )
+    allocate.add_argument(
+        "--note",
+        metavar="TEXT",
+        help="free-text clinician note recorded on the decision",
     )
     args = parser.parse_args(argv)
 
@@ -319,23 +391,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         profile = next(p for p in PRESETS if p.name == args.profile)
         engine = Engine(survival_model=model, clock=ManualClock(base), profile=profile)
 
+        patients = _demand_ward(parser, args)
         if args.csv:
-            if args.patients:
-                parser.error("cannot combine positional PATIENT specs with --csv")
-            loaded = _load_csv(args.csv, args.limit)
-            if not loaded:
-                print("no usable rows loaded — check the SOFA/Age columns")
-                return 1
-            patients = _apply_stagger(loaded, base, args.stagger_hours or 0)
-            print(f"loaded {len(loaded)} patients from {args.csv}\n")
-        else:
-            if args.stagger_hours:
-                parser.error("--stagger-hours only applies to --csv loads")
-            raw = [_parse_patient(p) for p in args.patients] if args.patients else [
-                _RawPatient(sofa=s, age=a, comorbidities=c, created_at=None)
-                for s, a, c in DEFAULT_WARD
-            ]
-            patients = raw
+            print(f"loaded {len(patients)} patients from {args.csv}\n")
 
         _register_ward(engine, patients, snapshot=base)
         _print_queue(engine.snapshot("initial").entries)
@@ -344,6 +402,49 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"\nafter {args.advance_hours:g} hours:\n")
             cast(ManualClock, engine._clock).advance(timedelta(hours=args.advance_hours))  # noqa: SLF001
             _print_queue(engine.snapshot("wait-elapsed").entries)
+
+        _print_trail(engine)
+        return 0
+
+    if args.command == "allocate":
+        base = _base_time()
+        model = PlaceholderSurvivalModel()
+        profile = next(p for p in PRESETS if p.name == args.profile)
+        engine = Engine(survival_model=model, clock=ManualClock(base), profile=profile)
+
+        patients = _demand_ward(parser, args)
+        if args.csv:
+            print(f"loaded {len(patients)} patients from {args.csv}\n")
+        _register_ward(engine, patients, snapshot=base)
+
+        engine.snapshot("bed-freed")
+        recommendation = engine.recommend()
+        print("Queued entries awaiting a bed:")
+        _print_queue(recommendation.queue)
+        print(f"\nRecommendation for the freed bed:\n  {recommendation.reasoning}\n")
+
+        if args.deviate:
+            chosen = _entry_spec(engine, args.deviate)
+            decision = engine.deviate_allocation(
+                recommendation, chosen, note=args.note
+            )
+        else:
+            decision = engine.confirm_allocation(recommendation, note=args.note)
+
+        change = (
+            ""
+            if decision.allocated.entry_id == decision.recommended.entry_id
+            else f" (deviation from {decision.recommended.patient_id})"
+        )
+        print(
+            f"{decision.outcome.value.capitalize()}: bed allocated to "
+            f"{decision.allocated.patient_id}{change}"
+        )
+        if decision.note:
+            print(f"  note: {decision.note}")
+        print(
+            f"  {len(engine.current_queue().entries)} entries remain in the queue"
+        )
 
         _print_trail(engine)
         return 0
