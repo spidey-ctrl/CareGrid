@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from caregrid import Engine, EntryView, ManualClock, Sofa, SurvivalPrediction
+from caregrid import Engine, EntryView, ManualClock, Sofa, SurvivalPrediction, WeightProfile
 
 T0 = datetime(2026, 1, 1, 8, 0, tzinfo=timezone.utc)
 
@@ -40,11 +40,13 @@ def engine_factory() -> Callable[..., Engine]:
         *,
         wait_horizon: timedelta | None = None,
         clock: ManualClock | None = None,
+        profile: WeightProfile | None = None,
     ) -> Engine:
         return Engine(
             survival_model=FakeSurvivalModel(probability),
             clock=clock if clock is not None else ManualClock(T0),
             wait_horizon=wait_horizon,
+            profile=profile,
         )
 
     return _make

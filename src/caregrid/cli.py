@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from .clock import ManualClock
 from .engine import Engine, EntryView
+from .profile import PRESETS, WeightProfile
 from .sofa import Sofa
 from .survival import SurvivalModel, SurvivalPrediction
 
@@ -293,12 +294,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="H",
         help="after ranking, advance the clock H hours and print the re-ranked queue",
     )
+    demo.add_argument(
+        "--profile",
+        choices=[p.name for p in PRESETS],
+        default=PRESETS[0].name,
+        help=f"weight profile to score under (default: {PRESETS[0].name})",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "demo":
         base = _base_time()
         model = PlaceholderSurvivalModel()
-        engine = Engine(survival_model=model, clock=ManualClock(base))
+        profile = next(p for p in PRESETS if p.name == args.profile)
+        engine = Engine(survival_model=model, clock=ManualClock(base), profile=profile)
 
         if args.csv:
             if args.patients:

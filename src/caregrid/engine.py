@@ -106,6 +106,10 @@ class Engine:
         )
         return entry_id
 
+    def set_profile(self, profile: WeightProfile) -> None:
+        """Switch the active profile; every already-ranked Queue Entry rescored under it."""
+        self._profile = profile
+
     def close_entry(self, entry_id: EntryId) -> None:
         if entry_id not in self._entries:
             raise UnknownEntry(entry_id)
